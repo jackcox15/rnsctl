@@ -9,7 +9,7 @@ A user friendly terminal interface for managing Reticulum mesh networks and Mesh
 
 ## Features
 
--**Interactive TUI** - Easy-to-use menu system
+- **Interactive TUI** - Easy-to-use menu system
 - **System Monitoring** - Real-time service status
 - **Service Management** - Restart services with one click
 - **Network Activity** - See nearby mesh devices
@@ -17,23 +17,12 @@ A user friendly terminal interface for managing Reticulum mesh networks and Mesh
 - **Quick Fixes** - One-click problem solving
 - **Detailed Logging** - Track system events
 
-## Supported Distributions
-
-- Arch Linux / Manjaro / Garuda / EndeavourOS
-- Debian / Ubuntu / Pop!_OS / Linux Mint
-- Fedora / RHEL / CentOS / Rocky Linux
-
 ## Quick Install
 ```bash
 git clone https://github.com/jackcox15/rnsctl
 cd rnsctl
 chmod +x install.sh
 ./install.sh
-```
-
-## Arch Linux (AUR)
-```bash
-yay -S rnsctl
 ```
 
 ## Usage
