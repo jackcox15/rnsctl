@@ -1,0 +1,1436 @@
+#!/usr/bin/env bash
+# rnsctl v7.0 - User-Friendly Mesh Operations Console
+
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+
+# ===== Config & Defaults =====
+SCRIPT_VERSION="7.0"
+HOME_DIR="$HOME"
+LOG_DIR="$HOME_DIR/rns_logs"
+STATUS_SNAPSHOT="$HOME_DIR/rns-status.txt"
+CFG_DIR="$HOME_DIR/.config/rnsctl"
+NICKS_FILE="$CFG_DIR/nicknames.csv"
+PORT_CACHE="$CFG_DIR/meshchat_port"
+PEER_CACHE="$CFG_DIR/online_peers.json"
+RETICULUM_CONFIG="${RETICULUM_CONFIG:-$HOME_DIR/.reticulum/config}"
+
+# Whiptail configuration
+WHIPTAIL_TITLE="Reticulum Mesh Control"
+WHIPTAIL_HEIGHT=24
+WHIPTAIL_WIDTH=80
+WHIPTAIL_MENU_HEIGHT=14
+
+# Universal MeshChat search paths
+MESHCHAT_DIRS=(
+  "/opt/reticulum-meshchat/storage"
+  "$HOME_DIR/reticulum-meshchat/storage"
+  "$HOME_DIR/.local/share/reticulum-meshchat/storage"
+  "$HOME_DIR/.config/reticulum-meshchat"
+)
+
+# Service name detection
+RETICULUM_SERVICE=""
+MESHCHAT_SERVICE=""
+
+# ===== Utility Functions =====
+cmd_exists(){ command -v "$1" >/dev/null 2>&1; }
+
+ensure_dirs(){
+  mkdir -p "$LOG_DIR" "$CFG_DIR" 2>/dev/null || return 1
+  [[ -f "$LOG_DIR/rnsctl.log" ]] || touch "$LOG_DIR/rnsctl.log" 2>/dev/null || return 1
+  if [[ ! -f "$NICKS_FILE" ]]; then
+    cat >"$NICKS_FILE"<<'EOF' 2>/dev/null || return 1
+# id_or_pubkey,nickname
+# 70521d080ae0dca9ba157e6366a7f863,Enigma
+EOF
+  fi
+  [[ -f "$PEER_CACHE" ]] || echo '{}' > "$PEER_CACHE" 2>/dev/null || return 1
+}
+
+log(){ 
+  printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG_DIR/rnsctl.log" 2>/dev/null || true
+}
+
+is_num(){
+  case "${1:-}" in
+    "" ) return 1;;
+    *[!0-9]* ) return 1;;
+    * ) return 0;;
+  esac
+}
+
+# ===== Whiptail Helpers =====
+# Dark theme for whiptail using newt colors
+export NEWT_COLORS='
+root=white,black
+window=white,black
+border=white,black
+shadow=black,black
+title=white,black
+button=black,white
+actbutton=white,black
+compactbutton=white,black
+checkbox=white,black
+actcheckbox=white,black
+entry=white,black
+label=white,black
+listbox=white,black
+actlistbox=white,black
+textbox=white,black
+acttextbox=white,black
+helpline=white,black
+roottext=white,black
+emptyscale=white,black
+fullscale=white,black
+disentry=white,black
+'
+
+msg_box(){
+  local title="$1"
+  local text="$2"
+  whiptail --title "$title" --msgbox "$text" $WHIPTAIL_HEIGHT $WHIPTAIL_WIDTH
+}
+
+info_box(){
+  msg_box "Information" "$1"
+}
+
+error_box(){
+  msg_box "Error" "$1"
+  log "ERROR: $1"
+}
+
+success_box(){
+  msg_box "Success" "$1"
+  log "SUCCESS: $1"
+}
+
+yesno_box(){
+  local title="$1"
+  local text="$2"
+  whiptail --title "$title" --yesno "$text" $WHIPTAIL_HEIGHT $WHIPTAIL_WIDTH
+}
+
+input_box(){
+  local title="$1"
+  local text="$2"
+  local default="${3:-}"
+  whiptail --title "$title" --inputbox "$text" $WHIPTAIL_HEIGHT $WHIPTAIL_WIDTH "$default" 3>&1 1>&2 2>&3
+}
+
+text_viewer(){
+  local title="$1"
+  local file="$2"
+  whiptail --title "$title" --textbox "$file" $WHIPTAIL_HEIGHT $WHIPTAIL_WIDTH --scrolltext
+}
+
+gauge(){
+  local title="$1"
+  local text="$2"
+  whiptail --title "$title" --gauge "$text" 8 $WHIPTAIL_WIDTH 0
+}
+
+# ===== Service Detection =====
+detect_services(){
+  if systemctl --user list-units --all 2>/dev/null | grep -qE "reticulum\.service|rnsd\.service"; then
+    if systemctl --user list-units --all 2>/dev/null | grep -q "reticulum\.service"; then
+      RETICULUM_SERVICE="reticulum.service"
+    elif systemctl --user list-units --all 2>/dev/null | grep -q "rnsd\.service"; then
+      RETICULUM_SERVICE="rnsd.service"
+    fi
+  elif systemctl list-units --all 2>/dev/null | grep -qE "reticulum\.service|rnsd\.service"; then
+    if systemctl list-units --all 2>/dev/null | grep -q "reticulum\.service"; then
+      RETICULUM_SERVICE="reticulum.service"
+    elif systemctl list-units --all 2>/dev/null | grep -q "rnsd\.service"; then
+      RETICULUM_SERVICE="rnsd.service"
+    fi
+  fi
+  
+  if systemctl --user list-units --all 2>/dev/null | grep -q "meshchat\.service"; then
+    MESHCHAT_SERVICE="meshchat.service"
+  elif systemctl list-units --all 2>/dev/null | grep -q "meshchat\.service"; then
+    MESHCHAT_SERVICE="meshchat.service"
+  fi
+  
+  log "Detected services: RETICULUM=$RETICULUM_SERVICE MESHCHAT=$MESHCHAT_SERVICE"
+}
+
+# ===== Privilege Management =====
+SUDO_AVAILABLE=0; cmd_exists sudo && SUDO_AVAILABLE=1 || true
+
+sudo_refresh(){
+  [[ "${SUDO_AVAILABLE:-0}" -eq 1 ]] || return 1
+  sudo -n -v 2>/dev/null && return 0
+  sudo -v
+}
+
+run_priv(){
+  if [[ "${SUDO_AVAILABLE:-0}" -eq 1 ]]; then
+    if sudo -n -v 2>/dev/null; then sudo "$@"; else sudo_refresh && sudo "$@"; fi
+  else
+    "$@"
+  fi
+}
+
+# ===== systemd Helpers =====
+is_active_any(){
+  local unit="${1:-}"
+  [[ -z "$unit" ]] && return 1
+  systemctl --user is-active --quiet "$unit" 2>/dev/null && return 0
+  systemctl is-active --quiet "$unit" 2>/dev/null && return 0
+  return 1
+}
+
+get_service_status(){
+  local unit="$1"
+  if is_active_any "$unit"; then
+    echo "Running"
+  else
+    echo "Stopped"
+  fi
+}
+
+restart_any(){
+  local unit="${1:-}"
+  [[ -z "$unit" ]] && return 1
+  if systemctl --user list-units 2>/dev/null | grep -q "$unit"; then
+    systemctl --user restart "$unit" 2>/dev/null && return 0
+  fi
+  run_priv systemctl restart "$unit"
+}
+
+# ===== MeshChat DB Discovery =====
+find_meshchat_db(){
+  local newest="" newest_mt=0
+  
+  # Search for database.db in identities subdirectories
+  for root in "${MESHCHAT_DIRS[@]}"; do
+    if [[ ! -d "$root" ]]; then
+      continue
+    fi
+    
+    # Look for identities/*/database.db pattern
+    if [[ -d "$root/identities" ]]; then
+      log "Searching for database in: $root/identities"
+      
+      # Use find to locate all database.db files under identities/
+      while IFS= read -r -d '' db; do
+        # Verify it's actually a SQLite database with the right tables
+        if cmd_exists sqlite3; then
+          local tables
+          tables="$(sqlite3 "$db" ".tables" 2>/dev/null || true)"
+          
+          # Check if it has the lxmf_messages table (confirms it's a MeshChat DB)
+          if [[ "$tables" == *"lxmf_messages"* ]]; then
+            # Get modification time to find the newest database
+            local mt
+            if stat -c %Y "$db" &>/dev/null; then
+              mt="$(stat -c %Y "$db" 2>/dev/null)"
+            elif stat -f %m "$db" &>/dev/null; then
+              mt="$(stat -f %m "$db" 2>/dev/null)"
+            else
+              mt=0
+            fi
+            
+            is_num "$mt" || mt=0
+            
+            if (( mt > newest_mt )); then 
+              newest="$db"
+              newest_mt="$mt"
+              log "Found valid database: $db (mtime: $mt)"
+            fi
+          fi
+        else
+          # If sqlite3 isn't available, just take the first database.db we find
+          if [[ -z "$newest" ]]; then
+            newest="$db"
+            log "Found database (no sqlite3 verification): $db"
+          fi
+        fi
+      done < <(find "$root/identities" -type f -name "database.db" -print0 2>/dev/null)
+    fi
+  done
+  
+  # Fallback: check for legacy/direct database.db locations
+  if [[ -z "$newest" ]]; then
+    for legacy_path in \
+      "/opt/reticulum-meshchat/storage/database.db" \
+      "$HOME_DIR/reticulum-meshchat/storage/database.db" \
+      "$HOME_DIR/.config/reticulum-meshchat/database.db" \
+      "$HOME_DIR/.local/share/reticulum-meshchat/database.db"; do
+      
+      if [[ -f "$legacy_path" ]]; then
+        newest="$legacy_path"
+        log "Found database at legacy path: $legacy_path"
+        break
+      fi
+    done
+  fi
+  
+  if [[ -n "$newest" ]]; then
+    echo "$newest"
+    return 0
+  fi
+  
+  log "No database found in any search location"
+  return 1
+}
+
+mc_stats(){
+  local db="${1:-}"
+  if ! cmd_exists sqlite3; then echo "0|0|0||0"; return 0; fi
+  local m a p u last
+  m="$(sqlite3 "$db" "SELECT COUNT(*) FROM lxmf_messages;" 2>/dev/null || echo 0)"
+  a="$(sqlite3 "$db" "SELECT COUNT(*) FROM announces;" 2>/dev/null || echo 0)"
+  p="$(sqlite3 "$db" "SELECT COUNT(DISTINCT source_hash) FROM lxmf_messages;" 2>/dev/null || echo 0)"
+  u="$(sqlite3 "$db" "SELECT COUNT(*) FROM lxmf_messages WHERE is_incoming=1 AND state!='read';" 2>/dev/null || echo 0)"
+  last="$(sqlite3 "$db" "SELECT datetime(MAX(timestamp), 'unixepoch') FROM lxmf_messages;" 2>/dev/null || echo "")"
+  echo "${m}|${a}|${p}|${last}|${u}"
+}
+
+# ===== MeshChat API & Port Detection =====
+detect_meshchat_port(){
+  if [[ -s "$PORT_CACHE" ]]; then
+    local cached; cached="$(cat "$PORT_CACHE" 2>/dev/null || true)"
+    if is_num "$cached" && (( cached > 1000 && cached < 65536 )); then
+      if curl -fsS --connect-timeout 2 "http://127.0.0.1:${cached}/api/v1/status" >/dev/null 2>&1; then
+        echo "$cached"
+        return 0
+      fi
+    fi
+  fi
+  
+  if curl -fsS --connect-timeout 2 "http://127.0.0.1:8000/api/v1/status" >/dev/null 2>&1; then
+    echo "8000" | tee "$PORT_CACHE" >/dev/null 2>&1
+    return 0
+  fi
+  
+  local ports=(3000 5000 8080 8888 9000)
+  for port in "${ports[@]}"; do
+    if curl -fsS --connect-timeout 2 "http://127.0.0.1:${port}/api/v1/status" >/dev/null 2>&1; then
+      echo "$port" | tee "$PORT_CACHE" >/dev/null 2>&1
+      return 0
+    fi
+  done
+  
+  echo "8000" | tee "$PORT_CACHE" >/dev/null 2>&1
+}
+
+meshchat_api_ok(){
+  local port; port="$(detect_meshchat_port)"
+  curl -fsS --connect-timeout 3 "http://127.0.0.1:${port}/api/v1/status" >/dev/null 2>&1
+}
+
+# ===== Show Status =====
+show_status(){
+  local db; db="$(find_meshchat_db 2>/dev/null || true)"
+  local m="0" a="0" p="0" last="" u="0"
+  
+  if [[ -n "$db" && -f "$db" ]] && cmd_exists sqlite3; then
+    IFS='|' read -r m a p last u <<<"$(mc_stats "$db")"
+  fi
+  
+  local rns_status="Unknown"
+  local rns_emoji="⚠"
+  [[ -n "$RETICULUM_SERVICE" ]] && {
+    rns_status="$(get_service_status "$RETICULUM_SERVICE")"
+    [[ "$rns_status" == "Running" ]] && rns_emoji="✓" || rns_emoji="✗"
+  }
+  
+  local mc_status="Unknown"
+  local mc_emoji="⚠"
+  [[ -n "$MESHCHAT_SERVICE" ]] && {
+    mc_status="$(get_service_status "$MESHCHAT_SERVICE")"
+    [[ "$mc_status" == "Running" ]] && mc_emoji="✓" || mc_emoji="✗"
+  }
+  
+  local api_status="Not Available"
+  local api_emoji="✗"
+  if meshchat_api_ok; then
+    api_status="Available"
+    api_emoji="✓"
+  fi
+  
+  local wg_status="Not Connected"
+  local wg_emoji="✗"
+  if cmd_exists wg; then
+    local interfaces; interfaces="$(wg show interfaces 2>/dev/null || echo '')"
+    if [[ -n "$interfaces" ]]; then
+      wg_status="Connected"
+      wg_emoji="✓"
+    fi
+  fi
+  
+  local health="GOOD"
+  local health_msg="All systems operational"
+  local problems=0
+  
+  [[ "$rns_status" != "Running" ]] && ((problems++))
+  [[ "$mc_status" != "Running" ]] && ((problems++))
+  [[ "$api_status" != "Available" ]] && ((problems++))
+  
+  if [[ $problems -gt 0 ]]; then
+    health="NEEDS ATTENTION"
+    health_msg="$problems system(s) need attention"
+  fi
+  
+  local status_text="
+═══════════════════════════════════════════════════
+              SYSTEM STATUS OVERVIEW
+═══════════════════════════════════════════════════
+
+Overall Health: $health
+$health_msg
+
+───────────────────────────────────────────────────
+NETWORK SERVICES
+───────────────────────────────────────────────────
+
+$rns_emoji Mesh Network (Reticulum):  $rns_status
+   The core mesh networking service
+
+$mc_emoji Chat Service (MeshChat):    $mc_status
+   Handles sending and receiving messages
+
+$api_emoji Web Interface:             $api_status
+   Lets you use the chat in your browser
+
+───────────────────────────────────────────────────
+YOUR MESSAGES
+───────────────────────────────────────────────────
+
+Total Messages:    $m
+Unread Messages:   $u
+People Chatted:    $p"
+
+  [[ -n "$last" ]] && status_text="$status_text
+Last Message:      $last"
+
+  status_text="$status_text
+
+───────────────────────────────────────────────────
+VPN CONNECTION
+───────────────────────────────────────────────────
+
+$wg_emoji WireGuard VPN: $wg_status"
+
+  if [[ -z "$db" ]]; then
+    status_text="$status_text
+
+───────────────────────────────────────────────────
+ WARNING
+───────────────────────────────────────────────────
+Message database not found. Chat may not be set up."
+  fi
+  
+  if [[ $problems -gt 0 ]]; then
+    status_text="$status_text
+
+───────────────────────────────────────────────────
+SUGGESTED ACTION
+───────────────────────────────────────────────────
+Try restarting services from the 'Manage Services'
+menu to fix any issues."
+  fi
+  
+  msg_box "System Status" "$status_text"
+}
+
+# ===== Service Management =====
+manage_services(){
+  while true; do
+    local rns_status="Unknown :("
+    local rns_desc=""
+    [[ -n "$RETICULUM_SERVICE" ]] && {
+      rns_status="$(get_service_status "$RETICULUM_SERVICE")"
+      [[ "$rns_status" == "Running" ]] && rns_desc=" Running" || rns_desc=" Stopped"
+    }
+    
+    local mc_status="Unknown :("
+    local mc_desc=""
+    [[ -n "$MESHCHAT_SERVICE" ]] && {
+      mc_status="$(get_service_status "$MESHCHAT_SERVICE")"
+      [[ "$mc_status" == "Running" ]] && mc_desc=" Running" || mc_desc=" Stopped"
+    }
+    
+    local choice
+    choice=$(whiptail --title "Manage Services" --menu \
+"Current Status:
+• Mesh Network:  $rns_desc
+• Chat Service:  $mc_desc
+
+What would you like to do?" \
+      22 78 10 \
+      "1" "Restart Mesh Network" \
+      "2" "Restart Chat Service" \
+      "3" "Restart Everything" \
+      "4" "View Error Logs" \
+      "5" "Check Service Health" \
+      "6" "◄ Back to Main Menu" \
+      3>&1 1>&2 2>&3)
+    
+    case "$choice" in
+      1)
+        if [[ -z "$RETICULUM_SERVICE" ]]; then
+          error_box "Mesh network service not found on this system.\n\nPlease check your installation."
+        elif yesno_box "Restart Mesh Network" "This will restart your mesh radio connection.\n\nYou'll be offline for about 10 seconds.\n\nContinue?"; then
+          {
+            echo "0"; sleep 0.5
+            echo "30"; echo "# Stopping mesh network..."
+            sleep 1
+            echo "60"; echo "# Starting mesh network..."
+            restart_any "$RETICULUM_SERVICE"
+            sleep 1
+            echo "100"; echo "# Complete"
+          } | gauge "Restarting" "Restarting mesh network service..."
+          
+          if is_active_any "$RETICULUM_SERVICE"; then
+            success_box "Mesh Network Restarted\n\nThe mesh radio is back online.\nYou should be able to connect to other devices now."
+          else
+            error_box "Restart Failed\n\nThe mesh network didn't start properly.\nCheck the logs for more information."
+          fi
+        fi
+        ;;
+      2)
+        if [[ -z "$MESHCHAT_SERVICE" ]]; then
+          error_box "Chat service not found on this system.\n\nPlease check your installation."
+        elif yesno_box "Restart Chat Service" "This will restart the messaging system.\n\nAny messages being sent will be delayed.\n\nContinue?"; then
+          {
+            echo "0"; sleep 0.5
+            echo "30"; echo "# Stopping chat service..."
+            sleep 1
+            echo "60"; echo "# Starting chat service..."
+            restart_any "$MESHCHAT_SERVICE"
+            sleep 1
+            echo "100"; echo "# Complete"
+          } | gauge "Restarting" "Restarting chat service..."
+          
+          if is_active_any "$MESHCHAT_SERVICE"; then
+            success_box "Chat Service Restarted\n\nMessaging is back online.\nYou can now send and receive messages."
+          else
+            error_box "Restart Failed\n\nThe chat service didn't start properly.\nCheck the logs for more information."
+          fi
+        fi
+        ;;
+      3)
+        if yesno_box "Restart Everything" "This will restart ALL mesh services.\n\nYou'll be completely offline for 20-30 seconds.\n\nOnly do this if you're having serious problems.\n\nContinue?"; then
+          {
+            echo "0"; sleep 0.5
+            echo "20"; echo "# Stopping all services..."
+            sleep 1
+            echo "40"; echo "# Restarting mesh network..."
+            [[ -n "$RETICULUM_SERVICE" ]] && restart_any "$RETICULUM_SERVICE"
+            sleep 2
+            echo "70"; echo "# Restarting chat service..."
+            [[ -n "$MESHCHAT_SERVICE" ]] && restart_any "$MESHCHAT_SERVICE"
+            sleep 2
+            echo "90"; echo "# Verifying services..."
+            sleep 1
+            echo "100"; echo "# Complete"
+          } | gauge "Full Restart" "Restarting all services..."
+          
+          local errors=0
+          [[ -n "$RETICULUM_SERVICE" ]] && ! is_active_any "$RETICULUM_SERVICE" && ((errors++))
+          [[ -n "$MESHCHAT_SERVICE" ]] && ! is_active_any "$MESHCHAT_SERVICE" && ((errors++))
+          
+          if [[ $errors -eq 0 ]]; then
+            success_box "All Services Restarted\n\nEverything is back online.\nYour mesh connection should be working now."
+          else
+            error_box "Some Services Failed\n\n$errors service(s) didn't start properly.\n\nCheck the error logs for details."
+          fi
+        fi
+        ;;
+      4)
+        view_logs_menu
+        ;;
+      5)
+        service_health_check
+        ;;
+      6|"")
+        return
+        ;;
+    esac
+  done
+}
+
+view_logs_menu(){
+  local choice
+  choice=$(whiptail --title "View Error Logs" --menu \
+"Logs help you understand what went wrong.
+
+Choose which system to check:" \
+    18 78 6 \
+    "1" "Mesh Network Logs - Radio connection issues" \
+    "2" "Chat Service Logs - Messaging problems" \
+    "3" "System Control Logs - This program's log" \
+    "4" "◄ Back" \
+    3>&1 1>&2 2>&3)
+  
+  case "$choice" in
+    1)
+      if [[ -n "$RETICULUM_SERVICE" ]]; then
+        if journalctl --user -u "$RETICULUM_SERVICE" -n 100 2>/dev/null > /tmp/rns_log.txt; then
+          text_viewer "Mesh Network Logs (Last 100 Lines)" /tmp/rns_log.txt
+        else
+          sudo journalctl -u "$RETICULUM_SERVICE" -n 100 > /tmp/rns_log.txt 2>/dev/null && \
+            text_viewer "Mesh Network Logs (Last 100 Lines)" /tmp/rns_log.txt || \
+            error_box "Could not read mesh network logs.\n\nYou may need administrator permissions."
+        fi
+        rm -f /tmp/rns_log.txt
+      else
+        error_box "Mesh network service not found.\n\nCannot display logs."
+      fi
+      ;;
+    2)
+      if [[ -n "$MESHCHAT_SERVICE" ]]; then
+        if journalctl --user -u "$MESHCHAT_SERVICE" -n 100 2>/dev/null > /tmp/mc_log.txt; then
+          text_viewer "Chat Service Logs (Last 100 Lines)" /tmp/mc_log.txt
+        else
+          sudo journalctl -u "$MESHCHAT_SERVICE" -n 100 > /tmp/mc_log.txt 2>/dev/null && \
+            text_viewer "Chat Service Logs (Last 100 Lines)" /tmp/mc_log.txt || \
+            error_box "Could not read chat service logs.\n\nYou may need administrator permissions."
+        fi
+        rm -f /tmp/mc_log.txt
+      else
+        error_box "Chat service not found.\n\nCannot display logs."
+      fi
+      ;;
+    3)
+      if [[ -f "$LOG_DIR/rnsctl.log" ]]; then
+        text_viewer "System Control Logs" "$LOG_DIR/rnsctl.log"
+      else
+        error_box "No system control logs found.\n\nLog file: $LOG_DIR/rnsctl.log"
+      fi
+      ;;
+  esac
+}
+
+# ===== Service Health Check =====
+service_health_check(){
+  local output="/tmp/service_health_$$.txt"
+  
+  {
+    echo "0"; sleep 0.3
+    echo "20"; echo "# Checking mesh network..."
+    sleep 0.5
+    echo "40"; echo "# Checking chat service..."
+    sleep 0.5
+    echo "60"; echo "# Checking web interface..."
+    sleep 0.5
+    echo "80"; echo "# Checking database..."
+    sleep 0.5
+    echo "100"; echo "# Health check complete"
+  } | gauge "Service Health Check" "Diagnosing system health..."
+  
+  local issues=()
+  local good=()
+  
+  {
+    echo "════════════════════════════════════════"
+    echo "      SERVICE HEALTH DIAGNOSTIC"
+    echo "════════════════════════════════════════"
+    echo ""
+    
+    if [[ -n "$RETICULUM_SERVICE" ]]; then
+      if is_active_any "$RETICULUM_SERVICE"; then
+        echo " Mesh Network Service: HEALTHY"
+        good+=("Mesh network is running")
+      else
+        echo " Mesh Network Service: STOPPED"
+        issues+=("Mesh network is not running")
+      fi
+    else
+      echo " Mesh Network Service: NOT FOUND"
+      issues+=("Mesh network service not installed")
+    fi
+    
+    if [[ -n "$MESHCHAT_SERVICE" ]]; then
+      if is_active_any "$MESHCHAT_SERVICE"; then
+        echo " Chat Service: HEALTHY"
+        good+=("Chat service is running")
+      else
+        echo "Chat Service: STOPPED"
+        issues+=("Chat service is not running")
+      fi
+    else
+      echo " Chat Service: NOT FOUND"
+      issues+=("Chat service not installed")
+    fi
+    
+    if meshchat_api_ok; then
+      echo " Web Interface: HEALTHY"
+      good+=("Web interface is accessible")
+    else
+      echo " Web Interface: NOT RESPONDING"
+      issues+=("Web interface is not responding")
+    fi
+    
+    local db; db="$(find_meshchat_db 2>/dev/null || true)"
+    if [[ -n "$db" && -f "$db" ]]; then
+      echo " Message Database: FOUND"
+      good+=("Message database is accessible")
+    else
+      echo " Message Database: NOT FOUND"
+      issues+=("Message database is missing")
+    fi
+    
+    echo ""
+    echo "════════════════════════════════════════"
+    
+    if [[ ${#issues[@]} -eq 0 ]]; then
+      echo "           ALL SYSTEMS HEALTHY"
+      echo ""
+      echo "Everything is working correctly!"
+      echo "You're ready to use the mesh network."
+    else
+      echo "        PROBLEMS DETECTED"
+      echo ""
+      echo "Issues found (${#issues[@]}):"
+      for issue in "${issues[@]}"; do
+        echo "   $issue"
+      done
+      echo ""
+      echo "WHAT TO DO:"
+      echo "  1. Try restarting the affected services"
+      echo "  2. Check the error logs for details"
+      echo "  3. Contact support if problems persist"
+    fi
+    
+    if [[ ${#good[@]} -gt 0 ]]; then
+      echo ""
+      echo "────────────────────────────────────────"
+      echo "Working systems (${#good[@]}):"
+      for item in "${good[@]}"; do
+        echo "  • $item"
+      done
+    fi
+  } > "$output"
+  
+  text_viewer "Service Health Report" "$output"
+  rm -f "$output"
+}
+
+# ===== Network Activity =====
+view_network_activity(){
+  local db; db="$(find_meshchat_db 2>/dev/null || true)"
+  
+  if [[ -z "$db" ]] || [[ ! -f "$db" ]]; then
+    error_box "Cannot find the message database.\n\nThe chat system may not be set up yet."
+    return
+  fi
+  
+  if ! cmd_exists sqlite3; then
+    error_box "Database tools not available.\n\nCannot display network activity."
+    return
+  fi
+  
+  local count
+  count="$(sqlite3 "$db" "SELECT COUNT(*) FROM announces WHERE updated_at > datetime('now', '-2 hours');" 2>/dev/null || echo 0)"
+  
+  if [[ "$count" -eq 0 ]]; then
+    info_box "No Recent Network Activity\n\nNo other mesh devices have been detected in the last 2 hours.\n\nThis is normal if:\n • You just started the system\n • You're out of radio range\n • Other devices are offline"
+    return
+  fi
+  
+  local tmpfile="/tmp/network_activity_$$.txt"
+  
+  {
+    echo "MESH NETWORK - RECENT ACTIVITY"
+    echo "Found $count device(s) in the last 2 hours"
+    echo "========================================"
+    echo ""
+    
+    sqlite3 "$db" "
+      SELECT 
+        substr(destination_hash,1,12) as ID,
+        COALESCE(rssi, 'unknown') as Signal,
+        datetime(updated_at, 'localtime') as LastSeen,
+        CASE aspect
+          WHEN 'lxmf.delivery' THEN 'Chat Node'
+          WHEN 'lxmf.propagation' THEN 'Message Router'
+          ELSE 'Mesh Device'
+        END as DeviceType
+      FROM announces 
+      WHERE updated_at > datetime('now', '-2 hours')
+      ORDER BY updated_at DESC 
+      LIMIT 30;" 2>/dev/null | while IFS='|' read -r id signal seen type; do
+      if [[ -n "$id" ]]; then
+        echo "Device: $id"
+        echo "  Type:        $type"
+        echo "  Signal:      $signal dBm"
+        echo "  Last Seen:   $seen"
+        echo ""
+      fi
+    done
+    
+    echo "========================================"
+    echo ""
+    echo "WHAT THIS MEANS:"
+    echo ""
+    echo " Chat Node       = Another user you can message"
+    echo " Message Router  = Helps deliver messages across the mesh"
+    echo " Mesh Device     = Other network device"
+    echo ""
+    echo "Signal Strength Guide:"
+    echo "  -50 to -70 dBm  = Awesome"
+    echo "  -70 to -85 dBm  = Good"
+    echo "  -85 to -95 dBm  = Fair"
+    echo "  Below -95 dBm   = Weak"
+    echo ""
+    echo "NOTE: Devices come and go as people move around"
+    echo "      or turn their radios on/off."
+  } > "$tmpfile"
+  
+  text_viewer "Network Activity" "$tmpfile"
+  rm -f "$tmpfile"
+}
+
+# ===== View My Messages Summary =====
+view_messages_summary(){
+  local db; db="$(find_meshchat_db 2>/dev/null || true)"
+  
+  if [[ -z "$db" ]] || [[ ! -f "$db" ]]; then
+    error_box "Cannot find message database.\n\nThe chat system may not be set up yet."
+    return
+  fi
+  
+  if ! cmd_exists sqlite3; then
+    error_box "Database tools not available."
+    return
+  fi
+  
+  local tmpfile="/tmp/messages_summary_$.txt"
+  
+  {
+    echo "════════════════════════════════════════"
+    echo "         YOUR MESSAGES SUMMARY"
+    echo "════════════════════════════════════════"
+    echo ""
+    
+    local total unread sent received
+    total="$(sqlite3 "$db" "SELECT COUNT(*) FROM lxmf_messages;" 2>/dev/null || echo 0)"
+    unread="$(sqlite3 "$db" "SELECT COUNT(*) FROM lxmf_messages WHERE is_incoming=1 AND state!='read';" 2>/dev/null || echo 0)"
+    sent="$(sqlite3 "$db" "SELECT COUNT(*) FROM lxmf_messages WHERE is_incoming=0;" 2>/dev/null || echo 0)"
+    received="$(sqlite3 "$db" "SELECT COUNT(*) FROM lxmf_messages WHERE is_incoming=1;" 2>/dev/null || echo 0)"
+    
+    echo "MESSAGE STATISTICS"
+    echo "──────────────────────────────────────"
+    echo "Total Messages:      $total"
+    echo "Sent by You:         $sent"
+    echo "Received:            $received"
+    echo "Unread:              $unread"
+    echo ""
+    
+    echo "RECENT CONVERSATIONS"
+    echo "──────────────────────────────────────"
+    
+    local has_messages=0
+    sqlite3 "$db" "
+      SELECT DISTINCT
+        substr(CASE WHEN is_incoming=1 THEN source_hash ELSE dest_hash END, 1, 12) as contact,
+        COUNT(*) as msg_count,
+        MAX(datetime(timestamp, 'unixepoch', 'localtime')) as last_msg,
+        SUM(CASE WHEN is_incoming=1 AND state!='read' THEN 1 ELSE 0 END) as unread_cnt
+      FROM lxmf_messages
+      GROUP BY contact
+      ORDER BY MAX(timestamp) DESC
+      LIMIT 10;" 2>/dev/null | while IFS='|' read -r contact count last unread_cnt; do
+      
+      if [[ -n "$contact" ]]; then
+        has_messages=1
+        echo ""
+        echo "Contact: $contact"
+        echo "  Messages:   $count"
+        echo "  Unread:     $unread_cnt"
+        echo "  Last msg:   $last"
+      fi
+    done
+    
+    if [[ $has_messages -eq 0 ]]; then
+      echo ""
+      echo "No conversations yet."
+      echo ""
+      echo "Open the MeshChat web interface to start"
+      echo "chatting with others on the mesh network!"
+    fi
+    
+    echo ""
+    echo "════════════════════════════════════════"
+    echo ""
+    echo "TIP: Open the web interface from the main"
+    echo "     menu to read and send messages."
+  } > "$tmpfile"
+  
+  text_viewer "Messages Summary" "$tmpfile"
+  rm -f "$tmpfile"
+}
+
+# ===== WireGuard Management =====
+manage_wireguard(){
+  if ! cmd_exists wg; then
+    error_box "WireGuard tools not installed.\n\nInstall with: sudo apt install wireguard-tools"
+    return
+  fi
+  
+  local tmpfile="/tmp/wg_status_$.txt"
+  
+  {
+    echo "WIREGUARD VPN STATUS"
+    echo "===================="
+    echo ""
+    
+    if wg show >/dev/null 2>&1; then
+      wg show
+    elif sudo -n wg show >/dev/null 2>&1; then
+      sudo wg show
+    else
+      echo "No WireGuard interfaces found or permission denied"
+      echo ""
+      echo "Network interfaces:"
+      ip addr show | grep -E "^[0-9]+: wg" -A2 || echo "No WireGuard interfaces configured"
+    fi
+    
+    echo ""
+    echo "===================="
+    echo "Relevant network routes:"
+    ip route show | grep -E "(wg|10\.|172\.|192\.168\.)" | head -10 || echo "No relevant routes found"
+  } > "$tmpfile" 2>&1
+  
+  text_viewer "WireGuard Status" "$tmpfile"
+  rm -f "$tmpfile"
+}
+
+# ===== Open MeshChat UI =====
+open_meshchat_ui(){
+  local port; port="$(detect_meshchat_port)"
+  local url="http://127.0.0.1:${port}"
+  
+  if ! meshchat_api_ok; then
+    error_box "MeshChat API is not responding.\n\nPlease check if MeshChat service is running."
+    return
+  fi
+  
+  if yesno_box "Open Web Interface" "Open MeshChat in your web browser?\n\nURL: $url"; then
+    for browser in xdg-open open firefox chromium google-chrome brave-browser; do
+      if cmd_exists "$browser"; then
+        $browser "$url" >/dev/null 2>&1 &
+        success_box "MeshChat web interface opened in browser"
+        return
+      fi
+    done
+    
+    info_box "Could not open browser automatically.\n\nPlease open this URL manually:\n$url"
+  fi
+}
+
+# ===== Generate Snapshot =====
+generate_snapshot(){
+  local db; db="$(find_meshchat_db || true)"
+  
+  {
+    echo "RETICULUM MESH NODE SNAPSHOT"
+    echo "Generated: $(date '+%F %T')"
+    echo "Version: rnsctl v${SCRIPT_VERSION}"
+    echo "Host: $(hostname)"
+    echo "User: $USER"
+    echo ""
+    echo "================================"
+    echo "SERVICES"
+    echo "================================"
+    if [[ -n "$RETICULUM_SERVICE" ]]; then
+      printf "%-25s %s\n" "Reticulum:" "$(is_active_any "$RETICULUM_SERVICE" && echo active || echo inactive)"
+    else
+      echo "Reticulum: not detected"
+    fi
+    if [[ -n "$MESHCHAT_SERVICE" ]]; then
+      printf "%-25s %s\n" "MeshChat:" "$(is_active_any "$MESHCHAT_SERVICE" && echo active || echo inactive)"
+    else
+      echo "MeshChat: not detected"
+    fi
+    echo ""
+    echo "================================"
+    echo "WIREGUARD VPN"
+    echo "================================"
+    if cmd_exists wg; then
+      wg show 2>/dev/null || sudo wg show 2>/dev/null || echo "No interfaces"
+    else
+      echo "WireGuard not installed"
+    fi
+    echo ""
+    echo "================================"
+    echo "MESHCHAT STATISTICS"
+    echo "================================"
+    if [[ -n "$db" && -f "$db" ]] && cmd_exists sqlite3; then
+      IFS='|' read -r m a p last u <<<"$(mc_stats "$db")"
+      echo "Database: $db"
+      echo "Total Messages: $m"
+      echo "Total Announces: $a"
+      echo "Unique Peers: $p"
+      echo "Unread Messages: $u"
+      echo "Last Message: $last"
+    else
+      echo "Database not found"
+    fi
+  } > "$STATUS_SNAPSHOT"
+  
+  success_box "System snapshot saved to:\n$STATUS_SNAPSHOT"
+}
+
+# ===== System Check =====
+system_check(){
+  local output="/tmp/system_check_$.txt"
+  
+  {
+    echo "0"; sleep 0.5
+    echo "10"; echo "# Checking Reticulum service..."
+    sleep 0.5
+    
+    echo "30"; echo "# Checking MeshChat service..."
+    sleep 0.5
+    
+    echo "50"; echo "# Checking MeshChat API..."
+    sleep 0.5
+    
+    echo "70"; echo "# Checking database..."
+    sleep 0.5
+    
+    echo "90"; echo "# Finalizing check..."
+    sleep 0.5
+    
+    echo "100"; echo "# Check complete"
+  } | gauge "System Check" "Running system diagnostics..."
+  
+  local problems=0
+  {
+    echo "SYSTEM DIAGNOSTIC REPORT"
+    echo "========================"
+    echo ""
+    
+    if [[ -n "$RETICULUM_SERVICE" ]]; then
+      if is_active_any "$RETICULUM_SERVICE"; then
+        echo "[OK] Reticulum service is running"
+      else
+        echo "[!!] Reticulum service is NOT running"
+        ((problems++))
+      fi
+    else
+      echo "[!!] Reticulum service not detected"
+      ((problems++))
+    fi
+    
+    if [[ -n "$MESHCHAT_SERVICE" ]]; then
+      if is_active_any "$MESHCHAT_SERVICE"; then
+        echo "[OK] MeshChat service is running"
+      else
+        echo "[!!] MeshChat service is NOT running"
+        ((problems++))
+      fi
+    else
+      echo "[!!] MeshChat service not detected"
+      ((problems++))
+    fi
+    
+    if meshchat_api_ok; then
+      echo "[OK] MeshChat API is responding"
+    else
+      echo "[!!] MeshChat API is NOT responding"
+      ((problems++))
+    fi
+    
+    local db; db="$(find_meshchat_db 2>/dev/null || true)"
+    if [[ -n "$db" && -f "$db" ]]; then
+      echo "[OK] MeshChat database found"
+    else
+      echo "[!!] MeshChat database NOT found"
+      ((problems++))
+    fi
+    
+    if cmd_exists wg; then
+      echo "[OK] WireGuard tools installed"
+    else
+      echo "[--] WireGuard tools not installed (optional)"
+    fi
+    
+    echo ""
+    echo "========================"
+    if [[ $problems -eq 0 ]]; then
+      echo "RESULT: All systems operational"
+    else
+      echo "RESULT: $problems problem(s) detected"
+      echo ""
+      echo "Suggested actions:"
+      echo "   Restart affected services"
+      echo "   Check service logs for errors"
+      echo "   Verify configuration files"
+    fi
+  } > "$output"
+  
+  text_viewer "System Diagnostic Results" "$output"
+  rm -f "$output"
+}
+
+# ===== Quick Fixes Menu =====
+quick_fixes_menu(){
+  while true; do
+    local choice
+    choice=$(whiptail --title "Quick Fixes" --menu \
+"Common problems and their solutions.
+
+Choose a problem to fix:" \
+      22 78 10 \
+      "1" "Can't connect to mesh - Restart network" \
+      "2" "Can't send messages - Restart chat" \
+      "3" "Web interface won't open - Check API" \
+      "4" "Everything is broken - Full restart" \
+      "5" "Clear old cache files - Free up space" \
+      "6" "View troubleshooting guide" \
+      "7" "◄ Back to Main Menu" \
+      3>&1 1>&2 2>&3)
+    
+    case "$choice" in
+      1)
+        if yesno_box "Fix Mesh Connection" "This will restart the mesh radio.\n\nIt should fix:\n • Can't see other devices\n • Radio not connecting\n • Network timeouts\n\nContinue?"; then
+          {
+            echo "50"; echo "# Restarting mesh network..."
+            [[ -n "$RETICULUM_SERVICE" ]] && restart_any "$RETICULUM_SERVICE"
+            sleep 2
+            echo "100"
+          } | gauge "Fixing Connection" "Restarting mesh network..."
+          success_box "Mesh Network Restarted\n\nTry connecting again.\nIt may take 30 seconds to see other devices."
+        fi
+        ;;
+      2)
+        if yesno_box "Fix Messaging" "This will restart the chat service.\n\nIt should fix:\n • Messages not sending\n • Messages stuck\n • Chat interface frozen\n\nContinue?"; then
+          {
+            echo "50"; echo "# Restarting chat service..."
+            [[ -n "$MESHCHAT_SERVICE" ]] && restart_any "$MESHCHAT_SERVICE"
+            sleep 2
+            echo "100"
+          } | gauge "Fixing Messaging" "Restarting chat service..."
+          success_box "Chat Service Restarted\n\nMessaging should work now.\nRefresh your web browser if it's open."
+        fi
+        ;;
+      3)
+        local port; port="$(detect_meshchat_port)"
+        if meshchat_api_ok; then
+          info_box "Web Interface Status: OK\n\nThe web interface is working.\n\nURL: http://127.0.0.1:$port\n\nIf you still can't access it, try:\n • Refreshing your browser\n • Clearing browser cache\n • Using a different browser"
+        else
+          if yesno_box "Fix Web Interface" "The web interface is not responding.\n\nRestart the chat service to fix this?\n\nContinue?"; then
+            {
+              echo "50"; echo "# Restarting chat service..."
+              [[ -n "$MESHCHAT_SERVICE" ]] && restart_any "$MESHCHAT_SERVICE"
+              sleep 3
+              echo "100"
+            } | gauge "Fixing Web Interface" "Restarting services..."
+            
+            sleep 2
+            if meshchat_api_ok; then
+              success_box "Web Interface Fixed!\n\nYou can now open it from the main menu.\n\nURL: http://127.0.0.1:$port"
+            else
+              error_box "Still Not Working\n\nThe web interface is still not responding.\n\nTry the 'Full Restart' option or check the error logs."
+            fi
+          fi
+        fi
+        ;;
+      4)
+        if yesno_box "Full System Restart" "This will restart EVERYTHING.\n\nUse this when:\n • Multiple things are broken\n • Nothing else worked\n • System is completely stuck\n\nYou'll be offline for 30 seconds.\n\nContinue?"; then
+          {
+            echo "0"
+            echo "25"; echo "# Stopping all services..."
+            sleep 1
+            echo "50"; echo "# Restarting mesh network..."
+            [[ -n "$RETICULUM_SERVICE" ]] && restart_any "$RETICULUM_SERVICE"
+            sleep 2
+            echo "75"; echo "# Restarting chat service..."
+            [[ -n "$MESHCHAT_SERVICE" ]] && restart_any "$MESHCHAT_SERVICE"
+            sleep 2
+            echo "100"; echo "# Complete!"
+          } | gauge "Full System Restart" "Restarting everything..."
+          
+          success_box "Full Restart Complete\n\nAll services have been restarted.\n\nEverything should be working now.\n\nIf you still have problems, check the error logs."
+        fi
+        ;;
+      5)
+        if yesno_box "Clear Cache Files" "This will delete temporary cache files.\n\nThis can help if:\n • System is running slow\n • Strange errors appearing\n • Old data causing problems\n\nYour messages will NOT be deleted.\n\nContinue?"; then
+          rm -f "$PORT_CACHE" "$PEER_CACHE" 2>/dev/null
+          success_box "Cache Cleared\n\nTemporary files have been deleted.\n\nThe system will rebuild them automatically."
+        fi
+        ;;
+      6)
+        view_troubleshooting_guide
+        ;;
+      7|"")
+        return
+        ;;
+    esac
+  done
+}
+
+# ===== Troubleshooting Guide =====
+view_troubleshooting_guide(){
+  local tmpfile="/tmp/troubleshooting_$.txt"
+  
+  cat > "$tmpfile" << 'EOF'
+════════════════════════════════════════════════════
+           TROUBLESHOOTING GUIDE
+════════════════════════════════════════════════════
+
+PROBLEM: Can't see any other devices
+────────────────────────────────────────────────────
+Possible causes:
+  • You're out of radio range
+  • Other devices are turned off
+  • Mesh network service isn't running
+  • Radio hardware issue
+
+Solutions:
+  1. Check "View System Status" - is mesh network running?
+  2. Try "Restart Mesh Network" from Quick Fixes
+  3. Move closer to other devices
+  4. Wait 1-2 minutes for network to sync
+
+
+PROBLEM: Messages won't send
+────────────────────────────────────────────────────
+Possible causes:
+  • Chat service is stopped
+  • No connection to recipient
+  • Message is too large
+
+Solutions:
+  1. Check "View System Status" - is chat service running?
+  2. Try "Restart Chat Service" from Quick Fixes
+  3. Make sure you see the recipient in network activity
+  4. Keep messages under 1000 characters
+
+
+PROBLEM: Web interface won't open
+────────────────────────────────────────────────────
+Possible causes:
+  • Chat service is stopped
+  • Browser cache issue
+  • Wrong port being used
+
+Solutions:
+  1. Try "Fix Web Interface" from Quick Fixes
+  2. Clear your browser cache and refresh
+  3. Try a different web browser
+  4. Check if chat service is running
+
+
+PROBLEM: System is very slow
+────────────────────────────────────────────────────
+Possible causes:
+  • Too many old cache files
+  • Database is very large
+  • System resources low
+
+Solutions:
+  1. Try "Clear Cache Files" from Quick Fixes
+  2. Restart the device if possible
+  3. Check available disk space
+
+
+PROBLEM: VPN not connecting
+────────────────────────────────────────────────────
+Possible causes:
+  • WireGuard not configured
+  • VPN server is down
+  • Network/firewall issue
+
+Solutions:
+  1. Check "WireGuard VPN Status" from main menu
+  2. Verify VPN configuration files
+  3. Contact your network administrator
+  4. Check internet connection
+
+
+GETTING MORE HELP
+────────────────────────────────────────────────────
+If these solutions don't work:
+
+  1. Run "System Health Check" from main menu
+  2. Check error logs (Manage Services > View Logs)
+  3. Generate a status report for support
+  4. Contact your system administrator
+
+Remember: Most problems can be fixed with a simple
+restart. Try the Quick Fixes menu first!
+
+EOF
+  
+  text_viewer "Troubleshooting Guide" "$tmpfile"
+  rm -f "$tmpfile"
+}
+
+# ===== Main Menu =====
+main_menu(){
+  while true; do
+    local choice
+    choice=$(whiptail --title "$WHIPTAIL_TITLE" \
+      --menu "═══════════════════════════════════════════════════════════════
+       RETICULUM MESH NETWORK CONTROL
+        Version $SCRIPT_VERSION
+═══════════════════════════════════════════════════════════════
+
+What would you like to do?" \
+      24 78 14 \
+      "1" "View System Status - Check if everything works" \
+      "2" "Manage Services - Start/stop/restart services" \
+      "3" "View Network Activity - See nearby devices" \
+      "4" "View My Messages - See message summary" \
+      "5" "Open Chat Interface - Use web browser to chat" \
+      "6" "VPN Status - Check WireGuard connection" \
+      "7" "System Health Check - Full diagnostic scan" \
+      "8" "Quick Fixes - Fix common problems fast" \
+      "9" "Save Status Report - For troubleshooting" \
+      "10" "Help & Troubleshooting - Get help" \
+      "11" "Exit - Close this program" \
+      3>&1 1>&2 2>&3)
+    
+    case "$choice" in
+      1) show_status ;;
+      2) manage_services ;;
+      3) view_network_activity ;;
+      4) view_messages_summary ;;
+      5) open_meshchat_ui ;;
+      6) manage_wireguard ;;
+      7) system_check ;;
+      8) quick_fixes_menu ;;
+      9) generate_snapshot ;;
+      10) view_troubleshooting_guide ;;
+      11|"")
+        if yesno_box "Exit" "Are you sure you want to exit?\n\nYour mesh services will keep running."; then
+          clear
+          echo ""
+          echo "═══════════════════════════════════════"
+          echo "  Thank you for using this tool!<3"
+          echo "═══════════════════════════════════════"
+          echo ""
+          echo ""
+          exit 0
+        fi
+        ;;
+    esac
+  done
+}
+
+# ===== Help Text =====
+show_help(){
+  cat <<'EOF'
+rnsctl v7.0 - User-Friendly Mesh Operations Console
+
+USAGE:
+  rnsctl [COMMAND]
+
+COMMANDS:
+  (none)        Launch interactive menu (default)
+  status        Show quick status
+  help          Show this help message
+
+FEATURES:
+  • Easy-to-use graphical menu interface
+  • Automatic service detection
+  • Network activity monitoring
+  • Service management and logs
+  • WireGuard VPN status
+  • System health checks
+
+REQUIREMENTS:
+  • whiptail (usually pre-installed)
+  • systemd
+  • Reticulum network stack
+  • MeshChat application
+
+For technical support, check the logs at:
+  $LOG_DIR/rnsctl.log
+
+EOF
+}
+
+# ===== Quick Status (CLI) =====
+quick_status(){
+  echo "Reticulum Mesh Node - Quick Status"
+  echo "================================"
+  echo ""
+  
+  local rns_status="Unknown"
+  [[ -n "$RETICULUM_SERVICE" ]] && rns_status="$(get_service_status "$RETICULUM_SERVICE")"
+  echo "Reticulum: $rns_status"
+  
+  local mc_status="Unknown"
+  [[ -n "$MESHCHAT_SERVICE" ]] && mc_status="$(get_service_status "$MESHCHAT_SERVICE")"
+  echo "MeshChat:  $mc_status"
+  
+  local api_status="Not Available"
+  meshchat_api_ok && api_status="Available"
+  echo "API:       $api_status"
+  
+  echo ""
+  
+  local db; db="$(find_meshchat_db 2>/dev/null || true)"
+  if [[ -n "$db" && -f "$db" ]] && cmd_exists sqlite3; then
+    IFS='|' read -r m a p last u <<<"$(mc_stats "$db")"
+    echo "Messages:  $m total, $u unread"
+    echo "Peers:     $p active"
+    echo "Announces: $a total"
+    [[ -n "$last" ]] && echo "Last msg:  $last"
+  else
+    echo "Database:  Not found"
+  fi
+  
+  echo ""
+  
+  if cmd_exists wg; then
+    local interfaces; interfaces="$(wg show interfaces 2>/dev/null || echo '')"
+    if [[ -n "$interfaces" ]]; then
+      echo "WireGuard: Active ($interfaces)"
+    else
+      echo "WireGuard: Inactive"
+    fi
+  else
+    echo "WireGuard: Not installed"
+  fi
+}
+
+# ===== Main Entry Point =====
+main(){
+  if ! cmd_exists whiptail; then
+    echo "ERROR: whiptail is required but not installed."
+    echo ""
+    echo "Please install it with:"
+    echo "  Debian/Ubuntu: sudo apt install whiptail"
+    exit 1
+  fi
+  
+  case "${1:-}" in
+    status)
+      quick_status
+      ;;
+    help|--help|-h)
+      show_help
+      ;;
+    "")
+      main_menu
+      ;;
+    *)
+      echo "Unknown command: $1"
+      echo "Run 'rnsctl help' for usage information"
+      exit 1
+      ;;
+  esac
+}
+
+# ===== Script Entry Point =====
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  if ! ensure_dirs 2>/dev/null; then
+    echo "WARNING: Could not create all directories"
+    echo "Some features may not work correctly"
+    sleep 2
+  fi
+  
+  detect_services
+  log "rnsctl v${SCRIPT_VERSION} started by $USER"
+  main "$@"
+fi

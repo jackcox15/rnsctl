@@ -1,0 +1,17 @@
+# Logs
+*.log
+rns_logs/
+
+# Temp files
+*.tmp
+*.swp
+*~
+
+# Cache
+.cache/
+__pycache__/
+
+# Build artifacts
+*.tar.gz
+pkg/
+src/
