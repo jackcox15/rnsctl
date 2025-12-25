@@ -5,7 +5,7 @@ set -e
 
 echo "╔════════════════════════════════════════════╗"
 echo "║   rnsctl - Reticulum Network Control Tool  ║"
-echo "║          Universal Installer v1.0           ║"
+echo "║          Universal Installer v1.0 :)       ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
 
@@ -34,7 +34,7 @@ case "$DISTRO" in
     sudo dnf install -y newt sqlite curl
     ;;
   *)
-    echo "WARNING: Unknown distro. Please install manually:"
+    echo "WARNING: Unknown distro. Please install manually sorry!"
     echo "  - whiptail/newt"
     echo "  - sqlite3"
     echo "  - curl"
@@ -43,30 +43,30 @@ case "$DISTRO" in
     ;;
 esac
 
-echo "✓ Dependencies installed"
+echo "Dependencies installed..."
 echo ""
 
 # Copy script to /usr/local/bin
 echo "[2/4] Installing rnsctl..."
 sudo cp rnsctl /usr/local/bin/rnsctl
 sudo chmod +x /usr/local/bin/rnsctl
-echo "✓ Installed to /usr/local/bin/rnsctl"
+echo " Installed to /usr/local/bin/rnsctl"
 echo ""
 
 # Create config directories
 echo "[3/4] Creating configuration directories..."
 mkdir -p "$HOME/.config/rnsctl"
 mkdir -p "$HOME/.local/share/rnsctl/logs"
-echo "✓ Configuration directories created"
+echo "Configuration directories created"
 echo ""
 
 # Verify installation
 echo "[4/4] Verifying installation..."
 if command -v rnsctl >/dev/null 2>&1; then
-  echo "✓ rnsctl is installed and ready!"
+  echo "rnsctl is installed and ready!"
   echo ""
   echo "╔════════════════════════════════════════════╗"
-  echo "║          Installation Complete!             ║"
+  echo "║         Installation Complete!             ║"
   echo "╚════════════════════════════════════════════╝"
   echo ""
   echo "Run 'rnsctl' to get started!"
