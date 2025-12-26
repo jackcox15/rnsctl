@@ -1319,7 +1319,7 @@ What would you like to do?" \
 # ===== Help Text =====
 show_help(){
   cat <<'EOF'
-rnsctl v7.0 - User-Friendly Mesh Operations Console
+rnsctl v1.0 - User-Friendly Mesh Operations Console
 
 USAGE:
   rnsctl [COMMAND]
