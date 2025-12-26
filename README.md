@@ -9,13 +9,13 @@ A user friendly terminal interface for managing Reticulum mesh networks and Mesh
 
 ## Features
 
-- **Interactive TUI** - Easy-to-use menu system
-- **System Monitoring** - Real-time service status
-- **Service Management** - Restart services with one click
-- **Network Activity** - See nearby mesh devices
-- **Message Overview** - View conversation stats
-- **Quick Fixes** - One-click problem solving
-- **Detailed Logging** - Track system events
+- **Interactive TUI**: Easy to use menu system
+- **System Monitoring**: Real time service status
+- **Service Management**: Restart services with one click
+- **Network Activity**:See nearby mesh devices
+- **Message Overview**: View conversation stats
+- **Quick Fixes**: One-click problem solving
+- **Detailed Logging**: Track system events
 
 ## Quick Install
 ```bash
@@ -44,6 +44,4 @@ rnsctl help
 - **Optional: MeshChat** - Messaging features
 - **Optional: WireGuard** - VPN connectivity
 
-## Contributing
-
-Pull requests welcome!
+### This tool was inspired by th original "kairosctl" program in the Kairos project
