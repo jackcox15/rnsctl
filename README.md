@@ -44,4 +44,13 @@ rnsctl help
 - **Optional: MeshChat** - Messaging features
 - **Optional: WireGuard** - VPN connectivity
 
-#### This tool was inspired by the original "kairosctl" program in the Kairos project
+### Built With
+- [Reticulum](https://reticulum.network/) - Cryptography based mesh networking stack by [@markqvist](https://github.com/markqvist)
+  
+- [MeshChat](https://github.com/liamcottle/reticulum-meshchat) - LXMF chat application by [@liamcottle](https://github.com/liamcottle)
+  
+- [Whiptail](https://linux.die.net/man/1/whiptail) - Dialog boxes for Bash scripts
+
+### Inspiration
+This tool originated from the [Kairos Project](https://github.com/jackcox15/Kairos) - a comprehensive mesh networking system focused on making Reticulum more accessible for privacy focusd individuals, mutual aid networks, or local communities striving for offline comms. 
+
