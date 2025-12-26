@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# rnsctl v7.0 - User-Friendly Mesh Operations Console
+# rnsctl v1.0 - TUI Mesh Operations Console
 
 export LANG=en_US.UTF-8
 export LC_ALL=en_US.UTF-8
 
 # ===== Config & Defaults =====
-SCRIPT_VERSION="7.0"
+SCRIPT_VERSION="1.0"
 HOME_DIR="$HOME"
 LOG_DIR="$HOME_DIR/rns_logs"
 STATUS_SNAPSHOT="$HOME_DIR/rns-status.txt"
