@@ -44,4 +44,4 @@ rnsctl help
 - **Optional: MeshChat** - Messaging features
 - **Optional: WireGuard** - VPN connectivity
 
-### This tool was inspired by th original "kairosctl" program in the Kairos project
+#### This tool was inspired by the original "kairosctl" program in the Kairos project
