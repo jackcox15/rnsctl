@@ -50,7 +50,7 @@ echo ""
 echo "[2/4] Installing rnsctl..."
 sudo cp rnsctl /usr/local/bin/rnsctl
 sudo chmod +x /usr/local/bin/rnsctl
-echo " Installed to /usr/local/bin/rnsctl"
+echo "Installed to /usr/local/bin/rnsctl"
 echo ""
 
 # Create config directories
@@ -73,6 +73,6 @@ if command -v rnsctl >/dev/null 2>&1; then
   echo "Run 'rnsctl status' for a quick system check"
   echo "Run 'rnsctl help' for usage information"
 else
-  echo "✗ Installation failed - rnsctl not found in PATH"
+  echo "Installation failed - rnsctl not found in PATH"
   exit 1
 fi
