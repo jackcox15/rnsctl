@@ -21,7 +21,8 @@ WHIPTAIL_HEIGHT=24
 WHIPTAIL_WIDTH=80
 WHIPTAIL_MENU_HEIGHT=14
 
-# Universal MeshChat search paths
+# Universal MeshChat search paths - update this section
+# if you stored reticulum-meshchat elsewhere! 
 MESHCHAT_DIRS=(
   "/opt/reticulum-meshchat/storage"
   "$HOME_DIR/reticulum-meshchat/storage"
@@ -41,8 +42,6 @@ ensure_dirs(){
   [[ -f "$LOG_DIR/rnsctl.log" ]] || touch "$LOG_DIR/rnsctl.log" 2>/dev/null || return 1
   if [[ ! -f "$NICKS_FILE" ]]; then
     cat >"$NICKS_FILE"<<'EOF' 2>/dev/null || return 1
-# id_or_pubkey,nickname
-# 70521d080ae0dca9ba157e6366a7f863,Enigma
 EOF
   fi
   [[ -f "$PEER_CACHE" ]] || echo '{}' > "$PEER_CACHE" 2>/dev/null || return 1
