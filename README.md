@@ -51,6 +51,4 @@ rnsctl help
   
 - [Whiptail](https://linux.die.net/man/1/whiptail) - Dialog boxes for Bash scripts
 
-### Inspiration
-This tool originated from the [Kairos Project](https://github.com/jackcox15/Kairos) - a comprehensive mesh networking system focused on making Reticulum more accessible for privacy focusd individuals, mutual aid networks, or local communities striving for offline comms. 
 
